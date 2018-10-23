@@ -1,5 +1,7 @@
 package com.tomtom.eventimporter
 
+import java.util.Date
+
 import com.mongodb.MongoCredential._
 import org.bson.codecs.configuration.CodecRegistries.{fromProviders, fromRegistries}
 import org.mongodb.scala._
@@ -13,10 +15,6 @@ import scala.languageFeature.postfixOps._
 
 
 object Importer extends App {
-
-  println("Hello world")
-
-
 
 
   val user: String = "root" // the user name
@@ -44,11 +42,14 @@ object Importer extends App {
 
   val collection: MongoCollection[Spot] = database.getCollection("spots")
 
-  val spot = Spot(latitude = 52.112233, longitude = 11.332211, source = "testApp")
+  val spot = Spot(latitude = 52.112233, longitude = 11.332211, reportingTime = new Date())
 
   Await.result(collection.insertOne(spot).toFuture(), 5 minutes)
 
 
+
   mongoClient.close()
+
+
 
 }

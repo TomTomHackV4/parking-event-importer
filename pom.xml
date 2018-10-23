@@ -28,7 +28,13 @@
         <dependency>
             <groupId>com.tomtom.parking.donald.live</groupId>
             <artifactId>message-serialization</artifactId>
-            <version>1.22</version>
+            <version>${donald.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.tomtom.parking.donald.live</groupId>
+            <artifactId>message-streams-kinesis</artifactId>
+            <version>${donald.version}</version>
         </dependency>
     </dependencies>
 
