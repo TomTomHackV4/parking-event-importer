@@ -1,17 +1,72 @@
 package com.tomtom.eventimporter
 
-import java.util.Date
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+import java.util.{Date, UUID}
 
+import akka.Done
+import akka.actor.ActorSystem
+import akka.stream.scaladsl.{Sink, Source}
+import akka.stream.{ActorMaterializer, ActorMaterializerSettings, Supervision}
 import com.mongodb.MongoCredential._
+import com.tomtom.parking.donald.fcd.Fix
+import com.tomtom.parking.donald.live.io.KinesisMessageStreamFactory
+import com.tomtom.parking.donald.live.messages.{ParkOutEvent, ParkingEvent}
+import com.tomtom.parking.donald.live.serialization.ParkingEventDeserializer
 import org.bson.codecs.configuration.CodecRegistries.{fromProviders, fromRegistries}
 import org.mongodb.scala._
 import org.mongodb.scala.bson.codecs.DEFAULT_CODEC_REGISTRY
 import org.mongodb.scala.bson.codecs.Macros._
 
 import scala.collection.JavaConverters._
-import scala.concurrent.Await
-import scala.concurrent.duration.DurationLong
+import scala.concurrent.{ExecutionContext, Future}
 import scala.languageFeature.postfixOps._
+
+
+class Importer(source: Source[(String, ParkingEvent), Future[Done]], mongoCollection: MongoCollection[Spot]) {
+
+  private val decider: Supervision.Decider = { e =>
+    println("Unhandled exception in stream", e)
+    // TODO: What does this actually mean? Shouldn't we use "Resume" instead?
+    Supervision.Resume
+  }
+
+
+
+  def startStream()(implicit system: ActorSystem): Future[Done] = {
+    val matSettings = ActorMaterializerSettings(system).withSupervisionStrategy(decider)
+    implicit val materializer: ActorMaterializer = ActorMaterializer(matSettings)
+
+    source
+      .collect { case (_, parkOutEvent: ParkOutEvent) => parkOutEvent }
+      .filter { e =>
+        println("Park-out event: " + new Date(e.timeStamp) +
+          s" (last fix time: ${e.trajectory.map(_.getLast.getTime).map(new Date(_))}, " +
+          s"detection time: ${new Date(e.creationTimeStamp)})")
+
+        e.timeStamp >= Importer.EarliestEventTime.getEpochSecond
+      }
+      .filter(_.trajectory.isDefined)
+      .map(_.trajectory.get.asScala.toSeq)
+      .map(toSpot)
+      .mapAsync(3)(insertSpot)
+      .to(Sink.ignore)
+      .run()
+  }
+
+
+  private def toSpot(fixes: Seq[Fix]): Spot = {
+    val firstFix = fixes.head
+    val eventTime = new Date(firstFix.getTime)
+    Spot(firstFix.getLatLon.latitude, firstFix.getLatLon.getLongitude, new Date(), eventTime)
+  }
+
+  private def insertSpot(spot: Spot): Future[Completed] = {
+    mongoCollection.insertOne(spot).toFuture
+  }
+
+  def shutDown: Unit = {}
+}
 
 
 object Importer extends App {
@@ -37,18 +92,31 @@ object Importer extends App {
       .build()
 
   val mongoClient: MongoClient = MongoClient(settings)
-
   val database: MongoDatabase = mongoClient.getDatabase("parkathon")
-
   val collection: MongoCollection[Spot] = database.getCollection("spots")
 
-  val spot = Spot(latitude = 52.112233, longitude = 11.332211, reportingTime = new Date())
+  val DefaultStreamName = "park-out-events-europe-dev"
+  val AwsRegion = "eu-west-1"
 
-  Await.result(collection.insertOne(spot).toFuture(), 5 minutes)
+  val MaxEventAgeMinutes = 5
+  val EarliestEventTime: Instant = Instant.now.minus(MaxEventAgeMinutes, ChronoUnit.MINUTES)
 
 
+  val streamFactory = KinesisMessageStreamFactory(
+    "parking-event-importer-hackaton-" + UUID.randomUUID(),
+    Some("donald"),
+    AwsRegion
+  )
 
-  mongoClient.close()
+  val parkingEventSource = streamFactory
+    .createSource(DefaultStreamName, new ParkingEventDeserializer, streamPosition = Some(Instant.now))
+
+  val importer = new Importer(parkingEventSource, collection)
+
+  implicit val system: ActorSystem = ActorSystem("ParkingImporter")
+  implicit val executionContext: ExecutionContext = system.dispatcher
+
+  val done = importer.startStream()
 
 
 
